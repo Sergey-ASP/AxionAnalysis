@@ -361,7 +361,7 @@ def _generate_burst(ts_data, ampl, freq, dur, start, FSamp):
     # dataBurst = TimeSeries(data_arrA+burst)
     return dataBurst
 
-def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, vel=3e5, radius=6e7, impact=0.8, freq=10, planet_rotation=True, station_position=[0,0,0], station_axis=[1,1,1], impact_direction = [1,0,0], plot_signal=False):
+def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, vel=3e5, radius=6e8, impact=0.8, freq=10, planet_rotation=True, station_position=None, station_axis=[1,0,0], impact_angle = 0, plot_signal=False):
     '''
     Injects a realistic axion star burst into an existing time series.
     The burst is based on the Linear + Exponential solution proposed in "Approximation methods in the study of boson stars", PRD 98.
@@ -383,44 +383,42 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
         station_axis (list): Station sensitive axis
         planet_rotation (bool): Account for earth rotation? default: True
         station_position (list): Station cartesian coordinate locations [m]
-        impact_direction (list): direction in wich impact parameter is applied w.r.t. injected signal direction 
+        impact_angle (float): angle at which impact parameter is applied w.r.t. injected signal direction [radians].  0 offsets along +z direction. 
         plot_signal (bool): Plot time series data for injected signal. Default: False
     '''
     
     osc_freq = freq*2*np.pi
     rad_earth = 6*10**6 
     kappa = 5.4
-    sigmaD = radius/kappa
+    sigD = radius/kappa
     # compton wavelength
     compton = (3e8)/osc_freq
     k = vel/(compton*3e8)
     # dir=[-1,0,0]
     
     # normalize axion direction vector if not already
-    # unit k-vector, proportional to unit velocity vector 
-    khat = dir/np.linalg.norm(dir)
+    dir_norm = dir/np.linalg.norm(dir)
     
-    # Starting position of axion star r0 at time t=0 
-    r0 = -2*radius*khat
-    impact_direction = np.array(impact_direction)
-    # applies impact parameter offset to initial position of the axion star using Gram-Schmidt process
-    if np.linalg.norm(np.cross(impact_direction,khat)) == 0:
-        raise Exception("Impact direction cannot be parallel to axion star velocity direction")
-    position_normal = impact_direction - np.dot(impact_direction,-khat)*(-khat)
-    unit_pos_norm = position_normal/np.linalg.norm(position_normal)
-    r0 = r0 + radius*impact*unit_pos_norm
+    # Starting position r0 at time t=0 
+    x0 = -2* radius
+    y0 = 0 * radius
+    # this is impact factor
+    z0 = radius*impact
+    r0 = np.array([x0, y0, z0])
+    # creates and applies rotation for transforming earth position vector
+    # rot = R.from_euler('xyz', [impact_angle, np.arcsin(dir_norm[2]),np.arctan(dir_norm[1]/dir_norm[0])])
+    # r0 = rot.apply(r0)
 
     
-    khat = khat
+    # unit k-vector, proportional to unit velocity vector 
+    khat = dir_norm
     
-    signal_amplitude = sqrt_n/np.sqrt((7*np.pi*sigmaD**3))
+    signal_amplitude = sqrt_n/np.sqrt((7*np.pi*sigD**3))
     # signal_amplitude = 10**10
-    station_position = np.array([station_position])
+    
     # Position of magnetometer as a function of time
     def r_mag(t):
-        # return r0+vel*khat*t
-        vector = station_position - (r0 + vel*khat*t)
-        return vector.flatten()
+        return r0+vel*khat*t
     
     def norm_r_mag(t):
         original = r_mag(t)
@@ -432,8 +430,7 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
     # calculates gradient of Linear + Exponential sln w.r.t radius
     def grad(t):
         # return -signal_amplitude/sigD*np.exp(-norm_r_mag(t)/sigD)*np.cos(k*np.dot(khat,r_mag(t)) - osc_freq*t)*r_hat(t) - signal_amplitude*np.exp(-norm_r_mag(t)/sigD)*np.sin(k*np.dot(khat,r_mag(t))-osc_freq*t)*k*khat
-        normpart = np.linalg.norm(r_mag(t))
-        return (-normpart/sigmaD**2 * signal_amplitude * np.exp(-normpart/sigmaD)*np.cos(k*np.dot(khat,r_mag(t)) - osc_freq*t))*r_hat(t) - signal_amplitude*(1+normpart/sigmaD)*np.exp(-normpart/sigmaD)*np.sin(k*np.dot(khat,r_mag(t)) - osc_freq*t)*k*khat
+        return np.multiply(-np.linalg.norm(r_mag(t))/sigD**2 * signal_amplitude * np.exp(-np.linalg.norm(r_mag(t))/sigD)*np.cos(k*np.dot(khat,r_mag(t)) - osc_freq*t),r_hat(t)) - signal_amplitude*(1+np.linalg.norm(r_mag(t))/sigD)*np.exp(-np.linalg.norm(r_mag(t))/sigD)*np.sin(k*np.dot(khat,r_mag(t)) - osc_freq*t)*k*khat
     
     
     # def normgrad(t):
@@ -481,7 +478,6 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
         return sig(t+passage-peak_start)
 
     # create burst burst data to be injected
-    
     burst = [gen_burst(t) for t in x]
     
     # inject burst
@@ -496,7 +492,7 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
     
     return dataBurst
 
-def load_data(start_date, end_date, station_list, std_station, freq_samp, impact, velocity, radius, i_angle, filepath='/GNOMEDrive/gnome/serverdata/',  shift_time=None, burst_ampl=None, burst_freq=None, burst_dur=None, burst_start=None,station_axes=None,station_positions=None,signal_vec=None):
+def load_data(start_date, end_date, station_list, std_station, freq_samp, impact, velocity, radius, i_angle, filepath='/GNOMEDrive/gnome/serverdata/',  shift_time=None, burst_ampl=None, burst_freq=None, burst_dur=None, burst_start=None,station_axes=None,signal_vec=None):
     '''
     Loads data for specified stations within time range.  This will only load data if it is sane.
     
@@ -564,11 +560,11 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
                                                      radius=radius,
                                                      impact=impact,
                                                      freq=burst_freq,
-                                                     planet_rotation=True,
-                                                     station_position=station_positions[station],
+                                                     planet_rotation=False,
+                                                     station_position=None,
                                                      station_axis=station_axes[station],
-                                                     impact_direction=i_angle,
-                                                     plot_signal=False)
+                                                     impact_angle=i_angle,
+                                                     plot_signal=True)
                     # data = _generate_burst(ts_data=data,ampl=proj_amp,freq=burst_freq, dur=burst_dur, start=burst_start,FSamp=freq_samp)
             else:
                 # use get_data_in_range() to get a TimeSeriesList of all the data between start and end
@@ -954,9 +950,7 @@ def coord_transform(station_coords: dict):
     '''
     
     # initialize dictionary of transformed coordinates
-    transformed_axes = dict()
     transformed_coords = dict()
-    
     
     # calculate azimuth and radial angles wrt center of sphere (radians)
     for station, coords in station_coords.items():
@@ -986,17 +980,13 @@ def coord_transform(station_coords: dict):
         
         # do coordinate transformations
         norm = np.array([x,y,z])
-        transformed_coords.update({station: norm*6*10**6})
-        up = np.array([0,0,1])
-        true_north = up - np.dot(up,norm)*norm
-        true_north = true_north/np.linalg.norm(true_north)
-        
+        true_north = np.array([-x,-y,z])
         east = np.cross(true_north,norm)
         az_vec = np.dot(true_north, math.cos(az)) + np.dot(east,math.sin(az))
         alt_vec = np.dot(az_vec,math.cos(alt)) + np.dot(norm,math.sin(alt))
-        transformed_axes.update({station: alt_vec})
+        transformed_coords.update({station: alt_vec})
      
-    return transformed_axes, transformed_coords
+    return transformed_coords
     
 
     
