@@ -19,7 +19,7 @@ from scipy.spatial.transform import Rotation as R
 import scipy.special
 from scipy.stats import chi2, chisquare,poisson,norm
 
-
+from numba import njit
 import pandas as pd
 import timeit
 import itertools
@@ -59,6 +59,8 @@ class Station(object):
         self.Nt = 1
         self.summed = False
         self.sub = False
+        self.df = 1
+        self.dt =1
     
     def excess_power_init(self, sampling_rate, min_time_seg_length, bandwidth_limit, make_plot=False, save_data=True):
         '''
@@ -135,22 +137,41 @@ class Station(object):
         self.add_tiles()
         return normalized_spectrogram
         
-    def plot_spectrogram(self, spectrogram='excess_power'):
+    def plot_spectrogram(self, spectrogram='excess_power',show_ts=False):
         '''
         Plots specified spectrogram of station.  default: excess power spectrogram.  while explicit Station attributes for \'excess_power\' do not exist, this is st
         
         Args:
             spectrogram (string): station spectrogram attribute
         '''
+        window_len = get_window_length(self.start_date,self.end_date)
         # spectrogram = np.repeat(np.repeat(spectrogram,self.dt,axis=0),self.df,axis=1)
         if spectrogram == 'excess_power':
             spec = getattr(self,'spec_normal')*2
         else:
             spec = getattr(self,spectrogram)
+        
+        if show_ts:
+            fig, axs = plt.subplots(2, gridspec_kw={'height_ratios':[4,1]})
+            ax1, ax2 = axs
+            ax2.plot(self.data)
+            ax2.autoscale(True, tight=True)
+            ax2.set_ylabel("amplitude (pT)")
+            ax1.set_xticks([])
+        else:
+            fig, axs = plt.subplots(1)
+            ax1 = axs
+        
             
-        mesh = plt.pcolormesh(np.arange(spec.shape[1]), np.arange(spec.shape[0]), spec, cmap='viridis',vmin=0)
-        plt.colorbar(mesh)
-        plt.title('Station: {}, Spectrogram: {}'.format(self.station,spectrogram))
+        mesh = ax1.pcolormesh(np.linspace(0,window_len,spec.shape[1]), np.linspace(0,self.bandwidth_limit,spec.shape[0]), spec, cmap='viridis',vmin=0)
+        cb = fig.colorbar(mesh,ax=axs)
+        if spectrogram == "mask":
+            plt.title('Coincidence events flagged')
+            cb.remove()
+        else:
+            fig.suptitle('{} {}: Delta T = {} s. Delta f = {} Hz.'.format(self.station,spectrogram, self.dt,self.df))
+        ax1.set_ylabel("frequency (Hz)")
+        plt.xlabel("time (s)")
         plt.show()
         
     def add_tiles(self, dt=None,df=None,verbose=False):
@@ -211,6 +232,8 @@ class Station(object):
             reshaped = self.del_S.reshape(m // y, y, n // x, x)
             self.del_S = reshaped.sum(axis=(1, 3)) 
             return
+        
+
             
             
             
@@ -417,24 +440,42 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
     # signal_amplitude = 10**10
     station_position = np.array([station_position])
     # Position of magnetometer as a function of time
+    # @njit
     def r_mag(t):
         # return r0+vel*khat*t
         vector = station_position - (r0 + vel*khat*t)
         return vector.flatten()
     
-    def norm_r_mag(t):
-        original = r_mag(t)
-        return np.linalg.norm(original)
+    def r_mag_vec(times):
+        vector = (station_position[None, :] - (r0[None, :] + (vel*khat)[None, :]*times[:,None]))
+        
+        return vector.reshape(vector.shape[1],3)
+    # def norm_r_mag(t):
+    #     original = r_mag(t)
+    #     return np.linalg.norm(original)
     
     def r_hat(t):
         return r_mag(t)/np.linalg.norm(r_mag(t))
     
     # calculates gradient of Linear + Exponential sln w.r.t radius
+    
+  
     def grad(t):
         # return -signal_amplitude/sigD*np.exp(-norm_r_mag(t)/sigD)*np.cos(k*np.dot(khat,r_mag(t)) - osc_freq*t)*r_hat(t) - signal_amplitude*np.exp(-norm_r_mag(t)/sigD)*np.sin(k*np.dot(khat,r_mag(t))-osc_freq*t)*k*khat
-        normpart = np.linalg.norm(r_mag(t))
-        return (-normpart/sigmaD**2 * signal_amplitude * np.exp(-normpart/sigmaD)*np.cos(k*np.dot(khat,r_mag(t)) - osc_freq*t))*r_hat(t) - signal_amplitude*(1+normpart/sigmaD)*np.exp(-normpart/sigmaD)*np.sin(k*np.dot(khat,r_mag(t)) - osc_freq*t)*k*khat
+        rvec = r_mag(t)
+        normpart = np.linalg.norm(rvec)
+        rhat = rvec / normpart
+        
+        
+        return (-normpart/sigmaD**2 * signal_amplitude * np.exp(-normpart/sigmaD)*np.cos(k*np.dot(khat,rvec) - osc_freq*t))*rhat - signal_amplitude*(1+normpart/sigmaD)*np.exp(-normpart/sigmaD)*np.sin(k*np.dot(khat,rvec) - osc_freq*t)*k*khat
     
+    
+    def grad_vec(times):
+        rvecs = r_mag_vec(times)
+        normparts = np.linalg.norm(rvecs, axis=1)
+        rhats = rvecs / normparts[:,None]
+        
+        return ((-normparts[:,None]/sigmaD**2 * signal_amplitude * np.exp(-normparts[:,None]/sigmaD)).flatten()*np.cos(k*(rvecs @ khat) - osc_freq*times))[:,None]*rhats - ((signal_amplitude*(1+normparts[:,None]/sigmaD)*np.exp(-normparts[:,None]/sigmaD)).flatten()*np.sin(k*(rvecs @ khat) - osc_freq*times))[:,None]*k*khat
     
     # def normgrad(t):
     #     original = np.nan_to_num(grad(t))
@@ -452,17 +493,28 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
     def mag_dir_rotating(t):
         return station_axis*np.cos(earth_freq*t) + np.cross(station_axis,earth_axis)*np.sin(earth_freq*t) + earth_axis*np.dot(station_axis,earth_axis)*(1-np.cos(earth_freq*t))
     
+    def mag_dir_rotating_vec(times):
+        # return station_axis*np.cos(earth_freq*t) + np.cross(station_axis,earth_axis)*np.sin(earth_freq*t) + earth_axis*np.dot(station_axis,earth_axis)*(1-np.cos(earth_freq*t))
+        return np.cos(earth_freq*times[:,None])*station_axis + np.cross(station_axis,earth_axis)*np.sin(earth_freq*times[:,None]) + earth_axis*np.dot(station_axis,earth_axis)*(1-np.cos(earth_freq*times[:,None]))
+
     if planet_rotation:
-        def sig(t):
-            return np.dot(mag_dir_rotating(t),np.nan_to_num(grad(t)))
+        # def sig(t):
+        #     return np.dot(mag_dir_rotating(t),np.nan_to_num(grad(t)))
+        def sig(times):
+            vec1 = mag_dir_rotating_vec(times)
+            vec2 = np.nan_to_num(grad_vec(times))
+            return np.sum(vec1*vec2, axis=1)
     else:
         def sig(t):
             return np.dot(station_axis, np.nan_to_num(grad(t)))
+        
+    def sig_vec(times):
+        vec1 = mag_dir_rotating_vec(times)
+        vec2 = np.nan_to_num(grad_vec(times))
+        return np.sum(vec1*vec2, axis=1)
     
     data_arrA = np.copy(ts_data.value)
-    
     start_delta = np.sqrt(radius**2 - (radius*impact)**2)/vel
-    
     s = ts_data.size/FSamp
     x = np.arange(0.,s,1./FSamp)
     # time where earth is closest to center of axion star
@@ -473,16 +525,17 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
     
     # fix ts data bounds
     if start<0:
-        start=0
+        start=0 
+    full_signal = sig(x)
     
-    def gen_burst(t):
-        if (t<start) or (t>endt):
+    def gen_burst(i,t):
+        if (t-passage+peak_start<start) or (t-passage+peak_start>endt):
             return 0
-        return sig(t+passage-peak_start)
+        # return sig(t+passage-peak_start)
+        return full_signal[i]
 
     # create burst burst data to be injected
-    
-    burst = [gen_burst(t) for t in x]
+    burst = [gen_burst(i,t) for i,t in enumerate(x)]
     
     # inject burst
     data_arrA[int(np.round(start*FSamp)):int(np.round(endt*FSamp))] = data_arrA[int(np.round(start*FSamp)):int(np.round(endt*FSamp))]+burst[int(np.round(start*FSamp)):int(np.round(endt*FSamp))]
@@ -577,6 +630,24 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
                 # join the individual TimeSeries in the list into a single TimeSeries, representing missing data with NaN
                 data = data1.join(pad=float('nan'), gap='pad')
                 sanity = sanity1.join(pad=int(0), gap='pad')
+                
+                if (station_axes != None) & (float(burst_ampl) != 0.0):
+                    # proj_amp = burst_ampl*np.dot(station_axes[station],np.array(signal_vec))
+                    
+                    data = _generate_realistic_burst(ts_data=data,
+                                                     dir=signal_vec,
+                                                     FSamp=freq_samp,
+                                                     peak_start=burst_start,
+                                                     sqrt_n=burst_ampl,
+                                                     vel=velocity,
+                                                     radius=radius,
+                                                     impact=impact,
+                                                     freq=burst_freq,
+                                                     planet_rotation=True,
+                                                     station_position=station_positions[station],
+                                                     station_axis=station_axes[station],
+                                                     impact_direction=i_angle,
+                                                     plot_signal=False)
 
                 if station in std_station:
                     station_set = True
@@ -998,7 +1069,18 @@ def coord_transform(station_coords: dict):
      
     return transformed_axes, transformed_coords
     
-
+def mask_resize(mask, prev_shape, shape):
+    '''
+    Resizes mask array to specified tile sizes
+    
+    Args:
+        mask: mask to be resized
+        prev_shape: original shape of mask
+        new
+    '''
+    
+    
+    pass
     
     
         
