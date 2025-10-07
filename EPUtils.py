@@ -102,22 +102,33 @@ class Station(object):
             self.freq = freq
         return spec_normal, spec
     
-    def ep_mask(self, mask, save_data=True):
+    def ep_mask(self, mask, save_data=True, type=None):
         '''
         Calculates excess power by masking flagged tiles out from the average psd.
         
         Args:
             mask (ndarray): Mask of data to ignore.  non-zero values correspond result in the tile being masked.
             save_data (bool): save data to Station object
+            type (string): Spectrogram type to analyze.  Must be non-normalized spectrogram.
         '''
+        if type==None:
+            if self.summed:
+                spec = self.spec_summed
+            else:
+                spec = self.spec
+        else:
+            spec = getattr(self,type)
+        
+        
         
         # if an entire frequeny band is masked, unmask it
         freq_fix_mask = (mask.all(1).__invert__()*mask.T).T
         
         if self.summed:
+            # revert dimensions of mask back to that of original spectrogram
             freq_fix_mask = np.kron(freq_fix_mask, np.ones((self.Nf, self.Nt))).astype(int)
         
-        masked_spec = ma.array(self.spec, mask=freq_fix_mask)
+        masked_spec = ma.array(spec, mask=freq_fix_mask)
         
         
         
@@ -127,12 +138,16 @@ class Station(object):
         # create matrix with avg psd replicated for each time segment
         # in the edge case where an entire frequency band is flagged, set avg to arbitrary small value
         # to make sure normalization will still flag band as above the excess power cutoff
-        avg_psd_matrix = np.nan_to_num(np.outer(avg_psd, np.ones(self.spec.shape[1])))
+        avg_psd_matrix = np.nan_to_num(np.outer(avg_psd, np.ones(spec.shape[1])))
         
         # normalize spectrogram
-        normalized_spectrogram = self.spec/avg_psd_matrix
+        normalized_spectrogram = spec/avg_psd_matrix
         if save_data:
+            # if self.summed:
+            #     self.spec_normal_summed = normalized_spectrogram
+            # else:
             self.spec_normal = normalized_spectrogram
+                
             
         self.add_tiles()
         return normalized_spectrogram
@@ -155,6 +170,15 @@ class Station(object):
             fig, axs = plt.subplots(2, gridspec_kw={'height_ratios':[4,1]})
             ax1, ax2 = axs
             ax2.plot(self.data)
+            
+            # highlight insane data
+            try:
+                arr2 = ma.array(np.arange(self.sanity.__len__()), mask=self.sanity).compressed()
+                arr2 = np.split(arr2, np.where(np.diff(arr2) != 1)[0]+1)
+                for range in arr2:
+                    ax2.axvspan(range[0], range[-1], color='red',alpha=0.5)
+            except:
+                pass
             ax2.autoscale(True, tight=True)
             ax2.set_ylabel("amplitude (pT)")
             ax1.set_xticks([])
@@ -162,14 +186,13 @@ class Station(object):
             fig, axs = plt.subplots(1)
             ax1 = axs
         
-            
         mesh = ax1.pcolormesh(np.linspace(0,window_len,spec.shape[1]), np.linspace(0,self.bandwidth_limit,spec.shape[0]), spec, cmap='viridis',vmin=0)
         cb = fig.colorbar(mesh,ax=axs)
         if spectrogram == "mask":
             plt.title('Coincidence events flagged')
             cb.remove()
         else:
-            fig.suptitle('{} {}: Delta T = {} s. Delta f = {} Hz.'.format(self.station,spectrogram, self.dt,self.df))
+            fig.suptitle('{} {}: $\Delta$t = {} s. $\Delta$f = {} Hz.'.format(self.station,spectrogram, self.dt,self.df))
         ax1.set_ylabel("frequency (Hz)")
         plt.xlabel("time (s)")
         plt.show()
@@ -277,7 +300,7 @@ class Station(object):
             self.sub_mask = freq_fix_mask
             self.subtracted = subtracted
             ep = masked_spec*2
-            stdev = np.outer(ep.std(1), np.ones(self.spec_summed.shape[1]))
+            stdev = np.outer(np.nan_to_num(ep).std(1), np.ones(self.spec_summed.shape[1]))
             
             # calculate inside of s unc
             del_S_sqrt = 2*stdev*self.spec_summed/np.sqrt(self.Nf*self.Nt) - stdev**2
@@ -331,13 +354,22 @@ class Station(object):
         else:
             eparr = ma.array(self.spec_normal*2, mask=np.zeros(self.spec_normal.shape))
             
-        stdev = np.std(eparr)
-        mean = np.mean(eparr)
+        stdev = np.std(np.nan_to_num(eparr))
+        mean = np.mean(np.nan_to_num(eparr))
         ma.masked_where(eparr > mean + cutoff*stdev,eparr,False)
-        return np.mean(eparr)
+        return np.mean(np.nan_to_num(eparr))
+    
+    def inject_signal(self, dir, fsamp, peak_start, ampl=5.48e18, vel=3e5, radius=6e7, impact=0.8, freq=10, planet_rotation=True, station_position=[0,0,0], station_axis=[1,1,1], impact_direction = [1,0,0], plot_signal=False):
+        self.data = _generate_realistic_burst(self.data, dir, fsamp, peak_start, ampl, vel, radius, impact, freq, planet_rotation, station_position, station_axis, impact_direction, plot_signal)
+        return
         
         
-            
+def sum_tiles(spec, Nf, Nt):
+    m, n = spec.shape
+    reshaped = spec.reshape(m // Nf, Nf, n // Nt, Nt)
+    spec = reshaped.sum(axis=(1, 3)) 
+    return spec
+         
         
         
         
@@ -384,7 +416,7 @@ def _generate_burst(ts_data, ampl, freq, dur, start, FSamp):
     # dataBurst = TimeSeries(data_arrA+burst)
     return dataBurst
 
-def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, vel=3e5, radius=6e7, impact=0.8, freq=10, planet_rotation=True, station_position=[0,0,0], station_axis=[1,1,1], impact_direction = [1,0,0], plot_signal=False):
+def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, ampl=5.48e18, vel=3e5, radius=6e7, impact=0.8, freq=10, planet_rotation=True, station_position=[0,0,0], station_axis=[1,1,1], impact_direction = [1,0,0], plot_signal=False):
     '''
     Injects a realistic axion star burst into an existing time series.
     The burst is based on the Linear + Exponential solution proposed in "Approximation methods in the study of boson stars", PRD 98.
@@ -399,7 +431,7 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
         FSamp (int): Sampling rate of ts_data [Hz]
         peak_start (int): Time at wich the distance between the earth and axion star centers is 
             equal to the impact factor
-        sqrt_n (float): Number of particles. Note the injected signal amplitude is proportional to the Sqrt(n).
+        ampl (float): signal amplitud (pT)
         vel (int): velocity of axion star [m/s]
         radius (int): Axion star radius [m]
         impact (int): Impact parameter of axion star. This is given as a fraction of the total radius
@@ -417,7 +449,6 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
     # compton wavelength
     compton = (3e8)/osc_freq
     k = vel/(compton*3e8)
-    # dir=[-1,0,0]
     
     # normalize axion direction vector if not already
     # unit k-vector, proportional to unit velocity vector 
@@ -436,11 +467,9 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
     
     khat = khat
     
-    signal_amplitude = sqrt_n/np.sqrt((7*np.pi*sigmaD**3))
-    # signal_amplitude = 10**10
+    signal_amplitude = ampl
     station_position = np.array([station_position])
     # Position of magnetometer as a function of time
-    # @njit
     def r_mag(t):
         # return r0+vel*khat*t
         vector = station_position - (r0 + vel*khat*t)
@@ -450,12 +479,6 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
         vector = (station_position[None, :] - (r0[None, :] + (vel*khat)[None, :]*times[:,None]))
         
         return vector.reshape(vector.shape[1],3)
-    # def norm_r_mag(t):
-    #     original = r_mag(t)
-    #     return np.linalg.norm(original)
-    
-    def r_hat(t):
-        return r_mag(t)/np.linalg.norm(r_mag(t))
     
     # calculates gradient of Linear + Exponential sln w.r.t radius
     
@@ -469,17 +492,12 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
         
         return (-normpart/sigmaD**2 * signal_amplitude * np.exp(-normpart/sigmaD)*np.cos(k*np.dot(khat,rvec) - osc_freq*t))*rhat - signal_amplitude*(1+normpart/sigmaD)*np.exp(-normpart/sigmaD)*np.sin(k*np.dot(khat,rvec) - osc_freq*t)*k*khat
     
-    
     def grad_vec(times):
         rvecs = r_mag_vec(times)
         normparts = np.linalg.norm(rvecs, axis=1)
         rhats = rvecs / normparts[:,None]
         
         return ((-normparts[:,None]/sigmaD**2 * signal_amplitude * np.exp(-normparts[:,None]/sigmaD)).flatten()*np.cos(k*(rvecs @ khat) - osc_freq*times))[:,None]*rhats - ((signal_amplitude*(1+normparts[:,None]/sigmaD)*np.exp(-normparts[:,None]/sigmaD)).flatten()*np.sin(k*(rvecs @ khat) - osc_freq*times))[:,None]*k*khat
-    
-    # def normgrad(t):
-    #     original = np.nan_to_num(grad(t))
-    #     return np.linalg.norm(original)
     
     # Earth's rotational frequency and rotational axis
     earth_freq = 2*np.pi*11.6e-6
@@ -505,13 +523,9 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
             vec2 = np.nan_to_num(grad_vec(times))
             return np.sum(vec1*vec2, axis=1)
     else:
-        def sig(t):
-            return np.dot(station_axis, np.nan_to_num(grad(t)))
-        
-    def sig_vec(times):
-        vec1 = mag_dir_rotating_vec(times)
-        vec2 = np.nan_to_num(grad_vec(times))
-        return np.sum(vec1*vec2, axis=1)
+        def sig(times):
+            vec1 = np.nan_to_num(grad_vec(times))
+            return np.sum(station_axis*vec1, axis=1)
     
     data_arrA = np.copy(ts_data.value)
     start_delta = np.sqrt(radius**2 - (radius*impact)**2)/vel
@@ -526,30 +540,32 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, sqrt_n=5.48e18, v
     # fix ts data bounds
     if start<0:
         start=0 
-    full_signal = sig(x)
+    # roll start of signal to line up with injection time region
+    full_signal = np.roll(sig(x),int((peak_start-passage)*FSamp))
+    # set rolled values to 0
+    full_signal[:int((peak_start-passage)*FSamp)] = 0
     
     def gen_burst(i,t):
-        if (t-passage+peak_start<start) or (t-passage+peak_start>endt):
+        if (t<start) or (t>endt):
             return 0
-        # return sig(t+passage-peak_start)
         return full_signal[i]
 
     # create burst burst data to be injected
-    burst = [gen_burst(i,t) for i,t in enumerate(x)]
+    # burst = [gen_burst(i,t) for i,t in enumerate(x)]
     
     # inject burst
-    data_arrA[int(np.round(start*FSamp)):int(np.round(endt*FSamp))] = data_arrA[int(np.round(start*FSamp)):int(np.round(endt*FSamp))]+burst[int(np.round(start*FSamp)):int(np.round(endt*FSamp))]
+    data_arrA[int(np.round(start*FSamp)):int(np.round(endt*FSamp))] = data_arrA[int(np.round(start*FSamp)):int(np.round(endt*FSamp))]+full_signal[int(np.round(start*FSamp)):int(np.round(endt*FSamp))]
     dataBurst = TimeSeries(data_arrA, sample_rate = FSamp)
     
     # plot injected burst timeseries data
     if plot_signal:
-        plt.plot(x,burst)
+        plt.plot(x,full_signal)
         plt.title("Injected signal")
         plt.show()
     
     return dataBurst
 
-def load_data(start_date, end_date, station_list, std_station, freq_samp, impact, velocity, radius, i_angle, filepath='/GNOMEDrive/gnome/serverdata/',  shift_time=None, burst_ampl=None, burst_freq=None, burst_dur=None, burst_start=None,station_axes=None,station_positions=None,signal_vec=None):
+def load_data(start_date, end_date, station_list, std_station, freq_samp, impact, velocity, radius, i_angle, filepath='/GNOMEDrive/gnome/serverdata/',  shift_time=None, burst_ampl=None, burst_freq=None, burst_dur=None, burst_start=None,station_axes=None,station_positions=None,signal_vec=None,verbose=False):
     '''
     Loads data for specified stations within time range.  This will only load data if it is sane.
     
@@ -565,18 +581,26 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
         filepath (string): Location of files.
         shift_time (int): Time each consecutive station's start date is shifted by. There is no time shift if no value is given.
     '''
-    n_stations = len(station_list)
     window_length = get_window_length(start_date, end_date)
+    slice_delta=0
+    adj_end = end_date
+    if int(window_length % 60) != 0:
+        # calculate adjusted end date that rounds up to next exact minute
+        adj_window = (window_length // 60 + 1) * 60
+        adj_end = get_end_time(start_date, adj_window) 
+        slice_delta = -(adj_window - window_length) * freq_samp
+        # window_length = adj_window
+    n_stations = len(station_list)
 
     # initialize data and sanity lists
     stat_obj_list = []
     data_list = TimeSeriesList()
     sanity_list = TimeSeriesList()
 
-    total_time = (datetime.strptime(end_date, '%Y-%m-%d-%H-%M-%S') - datetime.strptime(start_date, '%Y-%m-%d-%H-%M-%S')).total_seconds()
-
+    total_time = (datetime.strptime(end_date, '%Y-%m-%d-%H-%M-%S') - datetime.strptime(start_date, '%Y-%m-%d-%H-%M-%S')).total_seconds()    
     starts = [start_date]
-    ends = [end_date]
+    ends = [adj_end]
+    
     if shift_time is not None: # Time shift applied, if given.
         start_time_dt = datetime.strptime(start_date, '%Y-%m-%d-%H-%M-%S')
         end_time_dt = datetime.strptime(end_date, '%Y-%m-%d-%H-%M-%S')
@@ -590,7 +614,7 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
     else:
         for _ in range(n_stations):
             starts.append(start_date)
-            ends.append(end_date)
+            ends.append(adj_end)
 
     mask = np.zeros(len(station_list))
     station_arr = np.ma.masked_array(np.array(station_list), mask)
@@ -612,7 +636,7 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
                                                      dir=signal_vec,
                                                      FSamp=freq_samp,
                                                      peak_start=burst_start,
-                                                     sqrt_n=burst_ampl,
+                                                     ampl=burst_ampl,
                                                      vel=velocity,
                                                      radius=radius,
                                                      impact=impact,
@@ -621,15 +645,23 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
                                                      station_position=station_positions[station],
                                                      station_axis=station_axes[station],
                                                      impact_direction=i_angle,
-                                                     plot_signal=False)
+                                                     plot_signal=True)
                     # data = _generate_burst(ts_data=data,ampl=proj_amp,freq=burst_freq, dur=burst_dur, start=burst_start,FSamp=freq_samp)
             else:
+                # since gdas getdatainrance method only loads full minutes, calculate new time with extra minute.
+                
                 # use get_data_in_range() to get a TimeSeriesList of all the data between start and end
                 data1, sanity1, file_list = gdas.getDataInRange(station, starts[i], ends[i], path=filepath, convert=True, sortTime=False)
                 # print(data1)
                 # join the individual TimeSeries in the list into a single TimeSeries, representing missing data with NaN
                 data = data1.join(pad=float('nan'), gap='pad')
                 sanity = sanity1.join(pad=int(0), gap='pad')
+
+                # cut off extra data from end of ts data to get back to original window length
+                if slice_delta != 0:
+                    data = data[: slice_delta]
+                    sanity = sanity[: int(slice_delta/freq_samp)]
+                # flag each ±1 s of time series data with the appropriate sanity value
                 
                 if (station_axes != None) & (float(burst_ampl) != 0.0):
                     # proj_amp = burst_ampl*np.dot(station_axes[station],np.array(signal_vec))
@@ -638,7 +670,7 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
                                                      dir=signal_vec,
                                                      FSamp=freq_samp,
                                                      peak_start=burst_start,
-                                                     sqrt_n=burst_ampl,
+                                                     ampl=burst_ampl,
                                                      vel=velocity,
                                                      radius=radius,
                                                      impact=impact,
@@ -647,7 +679,7 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
                                                      station_position=station_positions[station],
                                                      station_axis=station_axes[station],
                                                      impact_direction=i_angle,
-                                                     plot_signal=False)
+                                                     plot_signal=True)
 
                 if station in std_station:
                     station_set = True
@@ -659,8 +691,13 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
                     for x in range(1, len(data) // (window_length * int(freq_samp)) + 1):
                         check_data = data[(x - 1) * int(freq_samp) * window_length:x * int(freq_samp) * window_length]
                         std_dev = np.nanstd(check_data)
-                        if std_dev.max() < min_std_dev:
-                            sanity[(x - 1) * window_length:x * window_length] = [0] * window_length
+                        if verbose:
+                            print('stdev for station {}: {}'.format(station, std_dev))
+                            print('expected min stdev is {}'.format(min_std_dev))
+                        if std_dev.max() > min_std_dev:
+                            print('{} failed std test'.format(station))
+                            ## NOT FUNCTIONAL: UNCOMMENT WHEN FIXED!!! ##
+                            # sanity[(x - 1) * window_length:x * window_length] = [0] * window_length
 
                 # check to make sure there are enough sane data for analysis
                 assert sanity.value[np.nonzero(sanity.value)].size > 0, "no sane data for station {}".format(station)
@@ -682,8 +719,6 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
                     s += 1
 
             assert passing, "not enough sane data for analysis (< {} consecutive seconds)".format(min_passing_run)
-
-            # flag each ±1 s of time series data with the appropriate sanity value
             data_arr = np.copy(data.value)
             sanity_arr = sanity.value
             is_sane = np.ones(data_arr.shape)
@@ -817,7 +852,7 @@ def calculate_cutoff(dofA, NstA, nCoinA=4, betaA=2.7e-7, sigmaA=5.):
     sol = scipy.optimize.fsolve(_betart, dofA+sigmaA,*np.sqrt(2*dofA), args=(dofA,beta2))
     return sol
 
-def mask(threshold, station_list, coincidence_number,max_loop=4, make_plot=False, verbose=False):
+def mask(threshold, station_list, coincidence_number,max_loop=4, make_plot=False, verbose=False, type=None):
     '''
     Runs mask loop to maximize sensitivity.
     Args:
@@ -862,7 +897,7 @@ def mask(threshold, station_list, coincidence_number,max_loop=4, make_plot=False
             flag_count = upd_flag_count
         
         for station in station_list:
-            station.ep_mask(mask)
+            station.ep_mask(mask, type=type)
             
     mask
         
@@ -870,12 +905,12 @@ def mask(threshold, station_list, coincidence_number,max_loop=4, make_plot=False
     if make_plot:
         
         station_list[0].mask = mask
-        station_list[0].plot_spectrogram('mask')
+        station_list[0].plot_spectrogram('mask')    
     
     # NOTE: mask is of size of summed spectrogram.
     return flag_count/station.spec_normal.size, mask_to_return
 
-def consistency(station_list: list[Station], mask, axes_dict: dict, ep_threshold, guess = [10,0,0],verbose = False,consistency_mask=None):
+def consistency(station_list: list[Station], mask, axes_dict: dict, ep_threshold, guess = [10,0,0],verbose = False,consistency_mask=None, resum = False):
     '''
     does expected event consistency check for events that have passed the coincedence check.  
     
@@ -1014,6 +1049,170 @@ def consistency(station_list: list[Station], mask, axes_dict: dict, ep_threshold
         except:
             print("no events above excess power threshold.")
     return sig_amp_list, xind, yind, sig_vec_list,x2_arr,passed_events
+
+def consistency_sum(station_list: list[Station], mask, axes_dict: dict, ep_threshold, dt, guess = [10,0,0],verbose = False,consistency_mask=None):
+    '''
+    does expected event consistency check for events that have passed the coincedence check.  
+    
+    Args:
+        station_list (list[Station]): list of station objects
+        mask (ndarray):  mask of event tiles.  1 = event.
+        axes_dict (dict): dictionary of station sensitive axes.
+        ep_threshold (int): excess power threshold.
+        guess (list):  xyz coordinate guess for m vector.
+        verbose (bool): verbose messaging.
+        consistency_mask (ndarray): mask of tiles to conduct consistency check on. 1 = do check.
+    '''
+    
+    # create lists of x and y coordinates that were flagged.  note these are indices, not actual values.
+    # used to keep track of what freq and time go with each flagged tile.
+    freq_fix_mask = (mask.all(1).__invert__()*mask.T).T
+    
+    # creates masked array: when you extract mask from this object, it converts it to bools so can invert it.
+    temp_array: ma.MaskedArray
+    temp_array = ma.array(freq_fix_mask,mask=freq_fix_mask)
+    if consistency_mask is not None:
+        temp2arr = ma.array(freq_fix_mask,mask=consistency_mask)
+        temp_array.__setmask__(temp2arr.mask & temp_array.mask)
+    # find the excess power thresholds of the larger time tiles for later use
+    ep_vectors_big = [ma.array(station.spec_normal_summed*2,mask=temp_array.mask.__invert__()).flatten().compressed() for station in station_list]
+    ep_vectors_big = np.vstack(ep_vectors_big).T
+    
+    # tile sum to new dt
+    tile_factor = station_list[0].dt / dt
+    for station in station_list:
+        station: Station
+        station.add_tiles(dt=dt,df=station.df,verbose=True)
+        
+    # resize masks
+    # mask = ma.repeat(mask, tile_factor, axis=1)
+    # consistency_mask = ma.repeat(consistency_mask, tile_factor, axis=1)
+    temp_array = ma.repeat(temp_array, tile_factor, axis=1)
+    
+    if station_list[0].summed:
+        xlen, ylen = station_list[0].spec_summed.shape
+    else:
+        xlen, ylen = station_list[0].spec.shape
+    x,y=np.meshgrid(np.arange(xlen),np.arange(ylen), indexing='ij')
+    xind = ma.array(x,mask=temp_array.mask.__invert__()).flatten().compressed()
+    yind = ma.array(y,mask=temp_array.mask.__invert__()).flatten().compressed()
+
+    # create list of coincidence events in subtracted avg data
+    station: Station
+    event_list = [station.event_list(temp_array.mask) for station in station_list]
+    
+    # creates list of event vectors containing exceess power for each station. each row is an event vector S.
+    event_vectors = np.vstack(event_list).T
+    
+    # creates list of event uncertainties for all flagged tiles at each station.  each row is the uncertanty of all stations for a given event.
+    event_unc = [ma.array(station.del_S,mask=temp_array.mask.__invert__()).flatten().compressed() for station in station_list]
+    event_unc = np.vstack(event_unc).T
+    
+    # create D matrix
+    d_matrix = [axes_dict.get(station.station) for station in station_list]
+    long_d = np.tile(d_matrix, len(station_list))
+    
+    # find mean excess power values for each station.  using cutoff of 3 sigma
+    avg_ep = [station.mean_ep() for station in station_list]
+    
+    # create list excess power vectors for each flagged event tile, if tile summed use respective spectrogram
+    if station_list[0].summed:
+        ep_vectors = [ma.array(station.spec_normal_summed*2,mask=temp_array.mask.__invert__()).flatten().compressed() for station in station_list]
+    else:
+        ep_vectors = [ma.array(station.spec_normal*2,mask=temp_array.mask.__invert__()).flatten().compressed() for station in station_list]
+    ep_vectors = np.vstack(ep_vectors).T
+    # ep_vectors = ep_vectors.T
+    
+    
+    sig_amp_list = []
+    sig_vec_list = []
+    x2_arr=[]
+    passed_events = []
+    passed_event_counter = 0
+    elist = []
+    
+    for i in range(len(xind)):
+        
+        ## CREATE BEST FIT M VECTORS ##
+        
+        s = event_vectors[i]
+        e = ep_vectors[i]
+        prod = np.prod(s)     
+        ds = event_unc[i]
+        
+        # chi squared function to minimize
+        def x2(arr):
+            return np.sum(np.square(np.square(np.dot(d_matrix,np.array(arr))) - s) / np.square(ds))
+        
+        # solve for best m
+        try:
+            result = scipy.optimize.least_squares(x2,guess, verbose=1)
+            m = result.x
+            if not result.success:
+                if verbose:
+                    print("scipy optimization failed.")
+                # continue
+        except:
+            if verbose:
+                print('residual error')
+            m = guess
+        sig_vec_list.append(m)
+        x2_arr.append(x2(m))
+        s_fit = (np.dot(d_matrix,np.array(m)))**2
+        s_adj = s/s_fit
+        ds_adj = ds/s_fit
+        s_avg = np.sum(s/ds**2)/np.sum(1/ds**2)
+        s_adj_avg = np.sum(s_adj/(ds_adj**2))/np.sum(1/(ds_adj**2))
+        ds_avg = np.sqrt(1/np.sum(1/(ds**2)))
+        ds_adj_avg = np.sqrt(1/np.sum(1/(ds_adj**2)))
+        
+        sig_amp_list.append(s_adj_avg/ds_adj_avg)
+        
+        # expected excess power
+        e_fit = ((e-avg_ep)/s)*s_fit+avg_ep
+        elist.append(e_fit)
+        
+        # check what stations are not consistently passing/failing ep threshold between e and e fit
+        pass_check = True
+        scaled_threshold = ep_threshold/tile_factor
+        for i, station_ep in enumerate(e):
+            if (station_ep > scaled_threshold) != (e_fit[i] > scaled_threshold):
+                pass_check = False
+                break
+            
+        # if the given event does not pass the consistency check, check next event
+        if pass_check:
+            passed_events.append(s_adj_avg/ds_adj_avg)
+            passed_event_counter +=1
+        
+    # sum together excess power tiles
+    
+    summed_expected = np.sum(np.reshape(elist, (len(xind)//int(tile_factor),int(tile_factor),len(station_list))),axis=1)
+    summed_likelyhood = np.sum(np.reshape(sig_amp_list, (len(xind)//int(tile_factor),int(tile_factor))),axis=1)
+    
+    
+    ## EXPECTED EVENT FIT CONSISTENCY CHECK ##
+    
+    
+    # # check what stations are not consistently passing/failing ep threshold between e and e fit
+    # for i in np.arange(len(summed_likelyhood)):
+    #     pass_check = True
+    #     for j, station_ep in enumerate(ep_vectors_big[i]):
+    #         if (station_ep > ep_threshold) != (summed_expected[i][j] > ep_threshold):
+    #             pass_check = False
+    #             break
+            
+    #     # if the given event does not pass the consistency check, check next event
+    #     if pass_check:
+    #         passed_events.append(summed_likelyhood[i])
+    #         passed_event_counter +=1
+        
+    if verbose:    
+        try:
+            print('{}% of events passed the consistency check ({}/{}).'.format(int(passed_event_counter*100/sig_amp_list.__len__()//1),passed_event_counter,sig_amp_list.__len__()))
+        except:
+            print("no events above excess power threshold.")
+    return sig_amp_list, xind, yind, sig_vec_list,x2_arr,passed_events
         
     
 def coord_transform(station_coords: dict):  
@@ -1082,7 +1281,13 @@ def mask_resize(mask, prev_shape, shape):
     
     pass
     
-    
+def desmos_parse(m_list):
+        parsed = ''
+        coordlist = np.transpose(m_list)
+        for i in range(coordlist[0].size):
+                parsed = parsed + ",({},{},{})".format(coordlist[0][i],coordlist[1][i],coordlist[2][i])
+
+        print(parsed)
         
     
     
