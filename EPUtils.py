@@ -30,6 +30,7 @@ from random import shuffle
 import seaborn as sns
 import matplotlib.cm as cm
 from multipledispatch import dispatch
+import pickle
 
 
 from matplotlib import rcParams, cycler
@@ -309,7 +310,7 @@ class Station(object):
             self.del_S = np.where(stdev>(self.spec_summed/np.sqrt(self.Nf*self.Nt)),stdev,np.sqrt(del_S_sqrt))      
             # self.del_S = np.sqrt(f)     
             # self.del_S = np.sqrt(f)
-            print('works')
+            # print('works')
         else:
             
             # generates masked spectrogram
@@ -359,10 +360,13 @@ class Station(object):
         ma.masked_where(eparr > mean + cutoff*stdev,eparr,False)
         return np.mean(np.nan_to_num(eparr))
     
-    def inject_signal(self, dir, fsamp, peak_start, ampl=5.48e18, vel=3e5, radius=6e7, impact=0.8, freq=10, planet_rotation=True, station_position=[0,0,0], station_axis=[1,1,1], impact_direction = [1,0,0], plot_signal=False):
-        self.data = _generate_realistic_burst(self.data, dir, fsamp, peak_start, ampl, vel, radius, impact, freq, planet_rotation, station_position, station_axis, impact_direction, plot_signal)
-        return
+    def inject_signal(self, dir, fsamp, peak_start, ampl=5.48e18, vel=3e5, radius=6e7, impact=0.8, freq=10, planet_rotation=True, station_position=[0,0,0], station_axis=[1,1,1], impact_direction = [1,0,0], plot_signal=False, generate_mask=False):
+        self.data, signal_bounds = _generate_realistic_burst(self.data, dir, fsamp, peak_start, ampl, vel, radius, impact, freq, planet_rotation, station_position, station_axis, impact_direction, plot_signal)
         
+        if generate_mask:
+            self.data, signal_bounds = _generate_realistic_burst(self.data, dir, fsamp, peak_start, ampl*1e3, vel, radius, impact, freq, planet_rotation, station_position, station_axis, impact_direction, plot_signal)
+        
+        return signal_bounds
         
 def sum_tiles(spec, Nf, Nt):
     m, n = spec.shape
@@ -563,7 +567,9 @@ def _generate_realistic_burst(ts_data, dir, FSamp, peak_start, ampl=5.48e18, vel
         plt.title("Injected signal")
         plt.show()
     
-    return dataBurst
+    sig_times = (start,endt)
+    
+    return dataBurst, sig_times
 
 def load_data(start_date, end_date, station_list, std_station, freq_samp, impact, velocity, radius, i_angle, filepath='/GNOMEDrive/gnome/serverdata/',  shift_time=None, burst_ampl=None, burst_freq=None, burst_dur=None, burst_start=None,station_axes=None,station_positions=None,signal_vec=None,verbose=False):
     '''
@@ -581,6 +587,7 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
         filepath (string): Location of files.
         shift_time (int): Time each consecutive station's start date is shifted by. There is no time shift if no value is given.
     '''
+    print('Loading from filepath: ',filepath)
     window_length = get_window_length(start_date, end_date)
     slice_delta=0
     adj_end = end_date
@@ -594,6 +601,7 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
 
     # initialize data and sanity lists
     stat_obj_list = []
+    signal_ts_bounds = (0,0)
     data_list = TimeSeriesList()
     sanity_list = TimeSeriesList()
 
@@ -628,11 +636,13 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
             _data, _sanity = _generate_noise(total_time, a=1.0, freq_samp=freq_samp)
 
             if station[:-2] == 'test':
+                # initialize data and sanity lists
                 data, sanity = _generate_noise(total_time, a=1.0, freq_samp=freq_samp)
+                signal_time_bounds = (0,0)
                 if (station_axes != None) & (float(burst_ampl) != 0.0):
                     # proj_amp = burst_ampl*np.dot(station_axes[station],np.array(signal_vec))
                     
-                    data = _generate_realistic_burst(ts_data=data,
+                    data, signal_ts_bounds = _generate_realistic_burst(ts_data=data,
                                                      dir=signal_vec,
                                                      FSamp=freq_samp,
                                                      peak_start=burst_start,
@@ -656,7 +666,7 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
                 # join the individual TimeSeries in the list into a single TimeSeries, representing missing data with NaN
                 data = data1.join(pad=float('nan'), gap='pad')
                 sanity = sanity1.join(pad=int(0), gap='pad')
-
+                signal_time_bounds = (0,0)
                 # cut off extra data from end of ts data to get back to original window length
                 if slice_delta != 0:
                     data = data[: slice_delta]
@@ -666,7 +676,7 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
                 if (station_axes != None) & (float(burst_ampl) != 0.0):
                     # proj_amp = burst_ampl*np.dot(station_axes[station],np.array(signal_vec))
                     
-                    data = _generate_realistic_burst(ts_data=data,
+                    data, signal_ts_bounds = _generate_realistic_burst(ts_data=data,
                                                      dir=signal_vec,
                                                      FSamp=freq_samp,
                                                      peak_start=burst_start,
@@ -773,7 +783,7 @@ def load_data(start_date, end_date, station_list, std_station, freq_samp, impact
             stat_obj_list.append(Station(station_list[i],sanity_list[i-i_adjust],data_list[i-i_adjust], start_date, end_date))
         else:
             i_adjust +=1
-    return sta_times,data_list, sanity_list, station_arr, starts, ends, stat_obj_list
+    return sta_times,data_list, sanity_list, station_arr, starts, ends, stat_obj_list, signal_ts_bounds
 
 def excess_power(ts_data, sampling_rate, min_time_seg_length, bandwidth_limit, make_plot=False):
     '''
@@ -1050,7 +1060,7 @@ def consistency(station_list: list[Station], mask, axes_dict: dict, ep_threshold
             print("no events above excess power threshold.")
     return sig_amp_list, xind, yind, sig_vec_list,x2_arr,passed_events
 
-def consistency_sum(station_list: list[Station], mask, axes_dict: dict, ep_threshold, dt, guess = [10,0,0],verbose = False,consistency_mask=None):
+def consistency_sum(station_list: list[Station], mask, axes_dict: dict, ep_threshold, dt, guess = [10,0,0],verbose = False,cmask_big=None,cmask_small=None, coincidence = 4):
     '''
     does expected event consistency check for events that have passed the coincedence check.  
     
@@ -1071,9 +1081,9 @@ def consistency_sum(station_list: list[Station], mask, axes_dict: dict, ep_thres
     # creates masked array: when you extract mask from this object, it converts it to bools so can invert it.
     temp_array: ma.MaskedArray
     temp_array = ma.array(freq_fix_mask,mask=freq_fix_mask)
-    if consistency_mask is not None:
-        temp2arr = ma.array(freq_fix_mask,mask=consistency_mask)
-        temp_array.__setmask__(temp2arr.mask & temp_array.mask)
+    if cmask_big is not None:
+        # temp2arr = ma.array(freq_fix_mask,mask=cmask_big)
+        temp_array.__setmask__(temp_array.mask & np.array(cmask_big, dtype=bool))
     # find the excess power thresholds of the larger time tiles for later use
     ep_vectors_big = [ma.array(station.spec_normal_summed*2,mask=temp_array.mask.__invert__()).flatten().compressed() for station in station_list]
     ep_vectors_big = np.vstack(ep_vectors_big).T
@@ -1082,12 +1092,14 @@ def consistency_sum(station_list: list[Station], mask, axes_dict: dict, ep_thres
     tile_factor = station_list[0].dt / dt
     for station in station_list:
         station: Station
-        station.add_tiles(dt=dt,df=station.df,verbose=True)
+        station.add_tiles(dt=dt,df=station.df,verbose=verbose)
         
     # resize masks
     # mask = ma.repeat(mask, tile_factor, axis=1)
     # consistency_mask = ma.repeat(consistency_mask, tile_factor, axis=1)
     temp_array = ma.repeat(temp_array, tile_factor, axis=1)
+    # temp2arr = ma.array(temp_array,mask=cmask_small)
+    temp_array.__setmask__(temp_array.mask & np.array(cmask_small, dtype=bool))
     
     if station_list[0].summed:
         xlen, ylen = station_list[0].spec_summed.shape
@@ -1128,6 +1140,8 @@ def consistency_sum(station_list: list[Station], mask, axes_dict: dict, ep_thres
     sig_vec_list = []
     x2_arr=[]
     passed_events = []
+    mean_adj_signal = []
+    uncertanties =[]
     passed_event_counter = 0
     elist = []
     
@@ -1146,7 +1160,7 @@ def consistency_sum(station_list: list[Station], mask, axes_dict: dict, ep_thres
         
         # solve for best m
         try:
-            result = scipy.optimize.least_squares(x2,guess, verbose=1)
+            result = scipy.optimize.least_squares(x2,guess, verbose=int(verbose))
             m = result.x
             if not result.success:
                 if verbose:
@@ -1175,20 +1189,34 @@ def consistency_sum(station_list: list[Station], mask, axes_dict: dict, ep_thres
         # check what stations are not consistently passing/failing ep threshold between e and e fit
         pass_check = True
         scaled_threshold = ep_threshold/tile_factor
+        coin_count = 0
+        if verbose:
+            print("coincidence for likelyhood stat: ",s_adj_avg/ds_adj_avg)
         for i, station_ep in enumerate(e):
-            if (station_ep > scaled_threshold) != (e_fit[i] > scaled_threshold):
-                pass_check = False
-                break
+            if verbose:
+                print('fitted ep: ',e_fit[i], ". Threshold: ", scaled_threshold)
+                if e_fit[i] > scaled_threshold:
+                    print('PASS')
+                else:
+                    print('FAIL')
+            if e_fit[i] > scaled_threshold:
+                coin_count += 1
+            # old more selective version
+            # if (station_ep > scaled_threshold) != (e_fit[i] > scaled_threshold):
+            #     pass_check = False
+            #     break
             
         # if the given event does not pass the consistency check, check next event
-        if pass_check:
+        if coin_count >= coincidence:
             passed_events.append(s_adj_avg/ds_adj_avg)
+            mean_adj_signal.append(s_adj_avg)
+            uncertanties.append(ds_adj_avg)
             passed_event_counter +=1
         
     # sum together excess power tiles
     
-    summed_expected = np.sum(np.reshape(elist, (len(xind)//int(tile_factor),int(tile_factor),len(station_list))),axis=1)
-    summed_likelyhood = np.sum(np.reshape(sig_amp_list, (len(xind)//int(tile_factor),int(tile_factor))),axis=1)
+    # summed_expected = np.sum(np.reshape(elist, (len(xind)//int(tile_factor),int(tile_factor),len(station_list))),axis=1)
+    # summed_likelyhood = np.sum(np.reshape(sig_amp_list, (len(xind)//int(tile_factor),int(tile_factor))),axis=1)
     
     
     ## EXPECTED EVENT FIT CONSISTENCY CHECK ##
@@ -1212,7 +1240,7 @@ def consistency_sum(station_list: list[Station], mask, axes_dict: dict, ep_thres
             print('{}% of events passed the consistency check ({}/{}).'.format(int(passed_event_counter*100/sig_amp_list.__len__()//1),passed_event_counter,sig_amp_list.__len__()))
         except:
             print("no events above excess power threshold.")
-    return sig_amp_list, xind, yind, sig_vec_list,x2_arr,passed_events
+    return sig_amp_list, xind, yind, sig_vec_list,x2_arr,passed_events, mean_adj_signal, uncertanties
         
     
 def coord_transform(station_coords: dict):  
@@ -1289,5 +1317,82 @@ def desmos_parse(m_list):
 
         print(parsed)
         
+
+class DataUtils(object):
+    
+    def __init__(self, name=time.strftime('%b_%d', time.localtime()), id=-1, signal_list=None):
+        self.directory=os.path.join(os.getcwd(),'FC_Data')
+        self.dirpath = os.path.join(self.directory, name)
+        self.name = name
+        if not os.path.isdir(self.dirpath):
+            os.makedirs(self.dirpath)
+            print('New directory created for FC Data files: ', self.dirpath)
+        
+        if id == -1:
+            path, dirs, files = next(os.walk(self.dirpath))
+            self.id = len(dirs)
+            print('FC ID Generated: ', self.id)
+        else:
+            self.id = id
+            
+        self.filepath = os.path.join(self.directory, self.name, 'fc_{}'.format(self.id))
+        if signal_list is not None:
+            if not os.path.isdir(self.filepath):
+                os.makedirs(self.filepath)
+            print('Filepath: ', self.filepath)
+            with open(os.path.join(self.filepath, 'signal_mapping.pkl'),'wb') as f:
+                pickle.dump(signal_list,f)
+            
+            
+            
+        pass
+
+    def save_dist(self, arr, label: str):
+        '''
+        save likelyhood statistic array for feldman cousins procedure.
+        
+        Args:
+            arr: array of likelyhood statistic values
+            label: filename label.
+        '''
+        
+        self.filepath = os.path.join(self.directory, self.name, 'fc_{}'.format(self.id))
+        if not os.path.isdir(self.filepath):
+            os.makedirs(self.filepath)
+        print('Filepath: ', self.filepath)
+        
+        with open(os.path.join(self.filepath,'{}_fc_dist.pkl'.format(label)),'wb') as f:
+            pickle.dump(arr,f)
+        print('Successfully saved file ', label)
+            
+    def load_dist(self,id = None):
+        self.filepath = os.path.join(self.directory, self.name, 'fc_{}'.format(self.id))
+        arr = np.array(os.listdir(self.filepath))
+        file_list = np.where(np.char.find(arr,"fc_dist.pkl") >= 0,arr,None)
+        file_list = file_list[file_list!= None]
+        with open(os.path.join(self.filepath, 'signal_mapping.pkl'),'rb') as f:
+                file_list = (pickle.load(f))
+        data_list = []
+        if id is not None:
+            file_list=np.char.add(np.array(file_list).astype(str),id + '_fc_dist.pkl')
+        else:    
+            file_list=np.char.add(np.array(file_list).astype(str),'_fc_dist.pkl')
+        for file_name in file_list:
+            with open(os.path.join(self.filepath, file_name),'rb') as f:
+                data_list.append(pickle.load(f))
+        return data_list
+    
+        
+        
+
+def load_dist(name, id, dir=os.getcwd()):
+    dirpath = os.path.join(dir, 'FC_Data', name)
+    if not os.path.isdir(dirpath):
+        raise FileNotFoundError("Filepath does not exist: {}".format(dirpath))
+    if not os.path.isdir(os.path.join(dirpath,'fc_{}'.format(id))):
+        raise FileNotFoundError("id does not exist: {}".format(id))
+    obj = DataUtils(name, id)
+    return obj, obj.load_dist()
+    
     
     
